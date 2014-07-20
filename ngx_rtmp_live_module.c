@@ -45,6 +45,13 @@ static ngx_command_t  ngx_rtmp_live_commands[] = {
       offsetof(ngx_rtmp_live_app_conf_t, nbuckets),
       NULL },
 
+    { ngx_string("store_key"),
+      NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_num_slot,
+      NGX_RTMP_APP_CONF_OFFSET,
+      offsetof(ngx_rtmp_live_app_conf_t, store_key),
+      NULL },
+
     { ngx_string("buffer"),
       NGX_RTMP_MAIN_CONF|NGX_RTMP_SRV_CONF|NGX_RTMP_APP_CONF|NGX_CONF_TAKE1,
       ngx_conf_set_msec_slot,
@@ -158,6 +165,7 @@ ngx_rtmp_live_create_app_conf(ngx_conf_t *cf)
     lacf->interleave = NGX_CONF_UNSET;
     lacf->wait_key = NGX_CONF_UNSET;
     lacf->wait_video = NGX_CONF_UNSET;
+    lacf->store_key = NGX_CONF_UNSET;
     lacf->publish_notify = NGX_CONF_UNSET;
     lacf->play_restart = NGX_CONF_UNSET;
     lacf->idle_streams = NGX_CONF_UNSET;
@@ -174,6 +182,7 @@ ngx_rtmp_live_merge_app_conf(ngx_conf_t *cf, void *parent, void *child)
 
     ngx_conf_merge_value(conf->live, prev->live, 0);
     ngx_conf_merge_value(conf->nbuckets, prev->nbuckets, 1024);
+    ngx_conf_merge_value(conf->store_key, prev->store_key, 0);
     ngx_conf_merge_msec_value(conf->buflen, prev->buflen, 0);
     ngx_conf_merge_msec_value(conf->sync, prev->sync, 300);
     ngx_conf_merge_msec_value(conf->idle_timeout, prev->idle_timeout, 0);
@@ -711,6 +720,7 @@ ngx_rtmp_live_av(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
     ngx_uint_t                      csidx;
     uint32_t                        delta;
     ngx_rtmp_live_chunk_stream_t   *cs;
+    ngx_uint_t                      i;
 #ifdef NGX_DEBUG
     const char                     *type_s;
 
@@ -810,6 +820,17 @@ ngx_rtmp_live_av(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
 
     if (codec_ctx) {
 
+        if (lacf->store_key > 0 && codec_ctx->store_key_size == 0)
+        {
+            codec_ctx->store_key_size = lacf->store_key;
+            codec_ctx->store_key_index = -1;
+            if (codec_ctx->storeframes == NULL)
+            {
+              codec_ctx->storeframes = (ngx_chain_t **)ngx_pcalloc(cscf->pool, sizeof(ngx_chain_t *) * lacf->store_key);  
+              codec_ctx->storeHeader = (ngx_rtmp_header_t *)ngx_pcalloc(cscf->pool, sizeof(ngx_rtmp_header_t) * lacf->store_key);            
+            }
+        }
+
         if (h->type == NGX_RTMP_MSG_AUDIO) {
             header = codec_ctx->aac_header;
 
@@ -836,6 +857,26 @@ ngx_rtmp_live_av(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
             {
                 prio = 0;
                 mandatory = 1;
+            }
+
+            if (lacf->store_key > 0 && codec_ctx->video_codec_id == NGX_RTMP_VIDEO_H264 &&
+                prio == NGX_RTMP_VIDEO_KEY_FRAME && !mandatory)
+            {
+                if (codec_ctx->store_key > 0){
+                    ngx_log_debug2(NGX_LOG_DEBUG_RTMP, ss->connection->log, 0,
+                                   "live: store key -> keyframes received  last timestamp=%s current timestamp=%uD",
+                                   codec_ctx->storeHeader[codec_ctx->store_key-1].timestamp,
+                                   ch.timestamp);
+                }
+                for (i=0;i<codec_ctx->store_key_size;i++)
+                {
+                    if (codec_ctx->storeframes[i] != NULL){
+                        ngx_rtmp_free_shared_chain(cscf, codec_ctx->storeframes[i]);
+                        codec_ctx->storeframes[i] = NULL;
+                    }
+                }
+                codec_ctx->store_key_index++;
+                codec_ctx->store_key = 0;
             }
         }
 
@@ -924,6 +965,10 @@ ngx_rtmp_live_av(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
                 if (header) {
                     if (apkt == NULL) {
                         apkt = ngx_rtmp_append_shared_bufs(cscf, NULL, header);
+                        if (lacf->store_key > 0)
+                        {
+                            lh.timestamp = 0;
+                        }
                         ngx_rtmp_prepare_message(s, &lh, NULL, apkt);
                     }
 
@@ -936,6 +981,10 @@ ngx_rtmp_live_av(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
                 if (coheader) {
                     if (acopkt == NULL) {
                         acopkt = ngx_rtmp_append_shared_bufs(cscf, NULL, coheader);
+                        if (lacf->store_key > 0)
+                        {
+                            clh.timestamp = 0;
+                        }
                         ngx_rtmp_prepare_message(s, &clh, NULL, acopkt);
                     }
 
@@ -962,6 +1011,10 @@ ngx_rtmp_live_av(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
 
                 if (apkt == NULL) {
                     apkt = ngx_rtmp_append_shared_bufs(cscf, NULL, in);
+                    if (lacf->store_key > 0)
+                    {
+                        ch.timestamp = 0;
+                    }
                     ngx_rtmp_prepare_message(s, &ch, NULL, apkt);
                 }
 
@@ -980,7 +1033,57 @@ ngx_rtmp_live_av(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
                     ngx_rtmp_send_message(ss, aapkt, 0);
                 }
 
+                if (lacf->store_key == 0 || codec_ctx->store_key == 0 || cs->store_key_sent)
+                  continue;
+            }
+        }
+
+        if (lacf->store_key > 0 && codec_ctx->store_key && !cs->store_key_sent)
+        {
+            rc = NGX_OK;
+
+            if (cs->store_key_sent_id != 0 && cs->store_key_index != codec_ctx->store_key_index)
+            {
+                // This frame is the new keyframes, direct sent the frames
+                rc = NGX_AGAIN;
+                ngx_log_error(NGX_LOG_INFO, ss->connection->log, 0,
+                               "live: ignore stored frames, sent the new key frames.");
+            }
+
+            if (rc == NGX_OK)
+            {
+                ngx_log_error(NGX_LOG_INFO, ss->connection->log, 0,
+                               "live: send stored frames packet start=%uD",
+                               cs->store_key_sent_id);
+
+                cs->store_key_index = codec_ctx->store_key_index;
+                for (i=cs->store_key_sent_id;i<codec_ctx->store_key;i++)
+                {
+                    if (codec_ctx->storeframes[i]==NULL) continue;
+                    rc = ngx_rtmp_send_message(ss, codec_ctx->storeframes[i], 0);
+                    if (rc != NGX_OK) {
+                        // retry at next packet cycle
+                        cs->store_key_sent_id = i;
+                        ngx_log_error(NGX_LOG_INFO, ss->connection->log, 0,
+                                       "live: \033[31msend sub key frames index=%uD timestamp=%uD failed\033[0m",
+                                       i, codec_ctx->storeHeader[i].timestamp);
+                        break;
+                    }
+                }
+                ngx_log_error(NGX_LOG_INFO, ss->connection->log, 0,
+                               "live: send stored %uD frames to client timestamp=%uD - %uD",
+                               codec_ctx->store_key, codec_ctx->storeHeader[0].timestamp, 
+                               codec_ctx->storeHeader[i>0?i-1:0].timestamp);
+            }else
+            {
+                rc = NGX_OK;
+            }
+
+            if (rc != NGX_OK) {
                 continue;
+            }else
+            {
+                cs->store_key_sent = 1;
             }
         }
 
@@ -1007,6 +1110,36 @@ ngx_rtmp_live_av(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
         cs->timestamp += delta;
         ++peers;
         ss->current_time = cs->timestamp;
+    }
+
+    if (lacf->store_key > 0 && codec_ctx && !mandatory && rpkt)
+    {
+        if (codec_ctx->store_key > 0 || 
+          (h->type == NGX_RTMP_MSG_VIDEO && codec_ctx->video_codec_id == NGX_RTMP_VIDEO_H264 && prio == NGX_RTMP_VIDEO_KEY_FRAME))
+        {
+            if (h->type == NGX_RTMP_MSG_AUDIO || h->type == NGX_RTMP_MSG_VIDEO) {
+                ngx_log_debug2(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                             "live: store frames index=%uD timestamp=%uD", codec_ctx->store_key,
+                             codec_ctx->storeframes[codec_ctx->store_key]);
+
+                codec_ctx->storeframes[codec_ctx->store_key] = ngx_rtmp_append_shared_bufs(cscf, codec_ctx->storeframes[codec_ctx->store_key], in);
+                ngx_rtmp_prepare_message(s, &ch, NULL, codec_ctx->storeframes[codec_ctx->store_key]);
+                
+                codec_ctx->storeHeader[codec_ctx->store_key] = ch;
+            }
+            // && prio == NGX_RTMP_VIDEO_KEY_FRAME
+            if (codec_ctx->store_key < (ngx_uint_t)lacf->store_key - 1)
+            {
+                codec_ctx->store_key++;
+            }else
+            {
+                // Overflow
+                ngx_log_debug0(NGX_LOG_DEBUG_RTMP, s->connection->log, 0,
+                             "live: store frames overflow");
+
+                codec_ctx->store_key = 0; // release code will execute at next keyframse
+            }
+        }
     }
 
     if (rpkt) {

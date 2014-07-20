@@ -181,6 +181,18 @@ ngx_rtmp_codec_disconnect(ngx_rtmp_session_t *s, ngx_rtmp_header_t *h,
         ctx->aac_header = NULL;
     }
 
+    if (ctx->store_key_size) {
+        ngx_uint_t i;
+        for (i = 0; i < ctx->store_key_size; i++)
+        {
+            if (ctx->storeframes[i])
+            {
+                ngx_rtmp_free_shared_chain(cscf, ctx->storeframes[i]);
+                ctx->storeframes[i] = NULL;
+            }
+        }
+    }
+
     if (ctx->meta) {
         ngx_rtmp_free_shared_chain(cscf, ctx->meta);
         ctx->meta = NULL;

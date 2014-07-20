@@ -22,6 +22,9 @@ typedef struct ngx_rtmp_live_stream_s ngx_rtmp_live_stream_t;
 
 typedef struct {
     unsigned                            active:1;
+    unsigned                            store_key_sent:1;
+    int32_t                             store_key_index;
+    int32_t                             store_key_sent_id;
     uint32_t                            timestamp;
     uint32_t                            csid;
     uint32_t                            dropped;
@@ -68,6 +71,7 @@ typedef struct {
     ngx_flag_t                          interleave;
     ngx_flag_t                          wait_key;
     ngx_flag_t                          wait_video;
+    ngx_int_t                           store_key;
     ngx_flag_t                          publish_notify;
     ngx_flag_t                          play_restart;
     ngx_flag_t                          idle_streams;
